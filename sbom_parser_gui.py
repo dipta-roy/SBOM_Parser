@@ -247,7 +247,7 @@ def parse_sbom(input_file):
 
 def save_to_csv(components, output_file):
     fieldnames = [
-        'SPDX_ID', 'Name', 'Version', 'Supplier',
+        'Tree_ID', 'SPDX_ID', 'Name', 'Version', 'Supplier',
         'License_Declared', 'Copyright_Text', 'Download_Location',
         'Homepage', 'Description', 'Package_Manager_Locator'
     ]
@@ -297,13 +297,14 @@ FONTS = {
 }
 
 COLUMNS = (
-    'SPDX_ID', 'Name', 'Version', 'Supplier',
+    'Tree_ID', 'SPDX_ID', 'Name', 'Version', 'Supplier',
     'License_Declared', 'Copyright_Text',
     'Download_Location', 'Homepage',
     'Description', 'Package_Manager_Locator'
 )
 
 COL_WIDTHS = {
+    'Tree_ID'                 : 80,
     'SPDX_ID'                 : 120,
     'Name'                    : 130,
     'Version'                 : 70,
@@ -881,24 +882,25 @@ class SBOMParserApp(tk.Tk):
         result = []
         visited = set()
 
-        def dfs(c_id, parent_id, depth):
+        def dfs(c_id, parent_id, depth, tree_id):
             if c_id in visited:
                 return
             visited.add(c_id)
             comp = comp_map[c_id].copy()
             comp['depth'] = depth
             comp['tree_parent'] = parent_id
+            comp['Tree_ID'] = tree_id
             result.append(comp)
             
-            for child_id in children.get(c_id, []):
-                dfs(child_id, c_id, depth + 1)
+            for idx, child_id in enumerate(children.get(c_id, []), start=1):
+                dfs(child_id, c_id, depth + 1, f"{tree_id}.{idx}")
 
-        for r_id in roots:
-            dfs(r_id, '', 0)
+        for idx, r_id in enumerate(roots, start=1):
+            dfs(r_id, '', 0, str(idx))
             
-        for c_id in comp_map:
-            if c_id not in visited:
-                dfs(c_id, '', 0)
+        unvisited = [c_id for c_id in comp_map if c_id not in visited]
+        for idx, c_id in enumerate(unvisited, start=len(roots) + 1):
+            dfs(c_id, '', 0, str(idx))
 
         return result
 
