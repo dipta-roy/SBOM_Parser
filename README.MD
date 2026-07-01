@@ -1,10 +1,10 @@
-# SPDX SBOM Parser GUI
+# SBOM Parser GUI
 
-A clean, modern desktop GUI tool to parse **SPDX SBOM files** (Software Bill of Materials) and export them to CSV.
+A clean, modern desktop GUI tool to parse **SPDX and CycloneDX SBOM files** (Software Bill of Materials) and export them to CSV.
 
-Supports the three main SPDX file formats:
+Supports the following formats:
 
-- JSON (`*.json`, SPDX 2.2 / 2.3 / 3.0 style)
+- JSON (`*.json`, SPDX 2.2 / 2.3 / 3.0 style and CycloneDX)
 - Tag-Value / .spdx (`*.spdx`, `*.tv`)
 - XML (`*.xml`, legacy SPDX format)
 
@@ -56,13 +56,13 @@ The parser extracts the most useful package-level fields and cleans them for rea
 2. Run the GUI
 
    ```bash
-   python sbom_parser_gui.py
+   python SBOM_Parser_GUI.py
    ```
 
    or on some systems:
 
    ```bash
-   python3 sbom_parser_gui.py
+   python3 SBOM_Parser_GUI.py
    ```
 
 3. In the app:
@@ -76,7 +76,7 @@ The parser extracts the most useful package-level fields and cleans them for rea
 
 | Format     | Extension       | Status      | Notes                                 |
 |------------|-----------------|-------------|---------------------------------------|
-| JSON       | `.json`         | Full        | Most common today (SPDX 2.2+)         |
+| JSON       | `.json`         | Full        | Most common today (SPDX 2.2+, CycloneDX) |
 | Tag-Value  | `.spdx`, `.tv`  | Full        | Classic SPDX format                   |
 | XML        | `.xml`          | Full        | Older SPDX-RDF/XML format             |
 
