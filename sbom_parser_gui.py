@@ -62,7 +62,18 @@ def parse_spdx_json(input_file):
             'Package_Manager_Locator' : extract_package_manager_locator(
                                             package.get('externalRefs', []))
         })
-    return components
+    
+    relationships = []
+    for rel in sbom_data.get('relationships', []):
+        rel_type = rel.get('relationshipType', '')
+        if rel_type in ('DEPENDS_ON', 'CONTAINS'):
+            relationships.append({
+                'parent': rel.get('spdxElementId'),
+                'child': rel.get('relatedSpdxElement'),
+                'type': rel_type
+            })
+
+    return components, relationships
 
 
 def parse_spdx_tv(input_file):
@@ -72,10 +83,23 @@ def parse_spdx_tv(input_file):
     components       = []
     current_package  = None
     current_ext_refs = []
+    relationships    = []
 
     for line in lines:
         line = line.strip()
         if not line or line.startswith('#'):
+            continue
+
+        if line.startswith('Relationship:'):
+            parts = line.split(':', 1)[1].strip().split()
+            if len(parts) >= 3:
+                rel_type = parts[1]
+                if rel_type in ('DEPENDS_ON', 'CONTAINS'):
+                    relationships.append({
+                        'parent': parts[0],
+                        'child': parts[2],
+                        'type': rel_type
+                    })
             continue
 
         if line.startswith('PackageName:'):
@@ -130,7 +154,7 @@ def parse_spdx_tv(input_file):
             extract_package_manager_locator(current_ext_refs)
         components.append(current_package)
 
-    return components
+    return components, relationships
 
 
 def parse_spdx_xml(input_file):
@@ -167,7 +191,21 @@ def parse_spdx_xml(input_file):
             'Description'             : get_text('description'),
             'Package_Manager_Locator' : extract_package_manager_locator(ext_refs)
         })
-    return components
+
+    relationships = []
+    for rel in root.iter(f'{ns}relationship'):
+        r_type = rel.find(f'{ns}relationshipType')
+        parent = rel.find(f'{ns}spdxElementId')
+        child = rel.find(f'{ns}relatedSpdxElement')
+        if r_type is not None and parent is not None and child is not None:
+            if r_type.text.strip() in ('DEPENDS_ON', 'CONTAINS'):
+                relationships.append({
+                    'parent': parent.text.strip(),
+                    'child': child.text.strip(),
+                    'type': r_type.text.strip()
+                })
+
+    return components, relationships
 
 
 def parse_sbom(input_file):
@@ -188,10 +226,18 @@ def save_to_csv(components, output_file):
         'License_Declared', 'Copyright_Text', 'Download_Location',
         'Homepage', 'Description', 'Package_Manager_Locator'
     ]
+    formatted_components = []
+    for comp in components:
+        row = comp.copy()
+        if 'depth' in row and row['depth'] > 0:
+            prefix = "    " * row['depth']
+            row['Name'] = prefix + str(row.get('Name', ''))
+        formatted_components.append(row)
+
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
-        writer.writerows(components)
+        writer.writerows(formatted_components)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -602,8 +648,13 @@ class SBOMParserApp(tk.Tk):
         tree_frame = tk.Frame(parent, bg=COLORS['surface'])
         tree_frame.pack(fill='both', expand=True)
 
-        self._tree = ttk.Treeview(tree_frame, columns=COLUMNS,
-                                  show='headings', selectmode='browse')
+        display_cols = [c for c in COLUMNS if c != 'Name']
+        self._tree = ttk.Treeview(tree_frame, columns=COLUMNS, displaycolumns=display_cols,
+                                  show='tree headings', selectmode='browse')
+        
+        self._tree.heading('#0', text='Name', command=lambda: self._sort_column('#0'))
+        self._tree.column('#0', width=COL_WIDTHS.get('Name', 130) + 40, minwidth=100, anchor='w')
+
         for col in COLUMNS:
             self._tree.heading(
                 col,
@@ -774,17 +825,65 @@ class SBOMParserApp(tk.Tk):
 
     def _parse_worker(self, input_file):
         try:
-            components = parse_sbom(input_file)
-            self.after(0, self._on_parse_success, components)
+            components, relationships = parse_sbom(input_file)
+            self.after(0, self._on_parse_success, components, relationships)
         except Exception as exc:
             self.after(0, self._on_parse_error, str(exc))
 
-    def _on_parse_success(self, components):
+    def _build_tree_data(self, components, relationships):
+        if not relationships:
+            for c in components:
+                c['depth'] = 0
+            return components
+
+        comp_map = {c['SPDX_ID']: c for c in components}
+        children = {c['SPDX_ID']: [] for c in components}
+        parents = {c['SPDX_ID']: [] for c in components}
+        
+        for rel in relationships:
+            p = rel['parent']
+            c = rel['child']
+            if p in comp_map and c in comp_map:
+                if c not in children[p]:
+                    children[p].append(c)
+                if p not in parents[c]:
+                    parents[c].append(p)
+
+        roots = [c_id for c_id in comp_map if not parents[c_id]]
+        if not roots:
+            roots = list(comp_map.keys())
+
+        result = []
+        visited = set()
+
+        def dfs(c_id, parent_id, depth):
+            if c_id in visited:
+                return
+            visited.add(c_id)
+            comp = comp_map[c_id].copy()
+            comp['depth'] = depth
+            comp['tree_parent'] = parent_id
+            result.append(comp)
+            
+            for child_id in children.get(c_id, []):
+                dfs(child_id, c_id, depth + 1)
+
+        for r_id in roots:
+            dfs(r_id, '', 0)
+            
+        for c_id in comp_map:
+            if c_id not in visited:
+                dfs(c_id, '', 0)
+
+        return result
+
+    def _on_parse_success(self, components, relationships):
         self._progress.stop()
         self._parse_btn.set_enabled(True)
-        self._components = components
-        self._populate_table(components)
-        self._update_stats(components)
+        tree_components = self._build_tree_data(components, relationships)
+        self._components = tree_components
+        self._populate_table(tree_components)
+        self._update_stats(tree_components)
         self._set_status(
             f'✔  Parsed {len(components)} components successfully.',
             COLORS['success'])
@@ -800,14 +899,26 @@ class SBOMParserApp(tk.Tk):
 
     def _populate_table(self, components):
         self._clear_table()
+        iid_map = {}
         for i, comp in enumerate(components):
             base_tag = 'odd' if i % 2 else 'even'
             tags     = (base_tag, 'no_purl') \
-                       if comp['Package_Manager_Locator'] == 'N/A' \
+                       if comp.get('Package_Manager_Locator', 'N/A') == 'N/A' \
                        else (base_tag,)
-            self._tree.insert('', 'end', iid=str(i),
-                              values=tuple(comp.values()),
-                              tags=tags)
+            
+            values = [comp.get(col, '') for col in COLUMNS]
+            
+            parent_spdx = comp.get('tree_parent', '')
+            parent_iid = iid_map.get(parent_spdx, '')
+            
+            my_iid = str(i)
+            iid_map[comp['SPDX_ID']] = my_iid
+            
+            self._tree.insert(parent_iid, 'end', iid=my_iid,
+                              text=comp.get('Name', ''),
+                              values=tuple(values),
+                              tags=tags,
+                              open=True)
 
     def _clear_table(self):
         self._tree.delete(*self._tree.get_children())
@@ -864,8 +975,12 @@ class SBOMParserApp(tk.Tk):
 
     def _sort_column(self, col):
         reverse = self._sort_reverse.get(col, False)
-        data    = [(self._tree.set(child, col), child)
-                   for child in self._tree.get_children('')]
+        if col == '#0':
+            data = [(self._tree.item(child, 'text'), child)
+                    for child in self._tree.get_children('')]
+        else:
+            data = [(self._tree.set(child, col), child)
+                    for child in self._tree.get_children('')]
         data.sort(key=lambda x: x[0].lower(), reverse=reverse)
         for idx, (_, child) in enumerate(data):
             self._tree.move(child, '', idx)

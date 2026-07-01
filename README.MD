@@ -16,10 +16,11 @@ The parser extracts the most useful package-level fields and cleans them for rea
 ## Features
 
 - Drag & drop or browse to select SPDX file
-- Table view of all extracted components/packages
+- Hierarchical tree-view displaying direct and transitive dependencies
+- Table view of all extracted components/packages with collapsible tree nodes
 - Cleaned supplier names (removes "Person:", "Organization:", "Tool:" prefixes)
 - Package-Manager locators (npm, pypi, maven, etc.) shown in one column
-- One-click export to clean CSV
+- One-click export to clean CSV (preserves dependency indentation)
 - Dark modern UI with rounded buttons and responsive layout
 
 ## Extracted Fields
@@ -67,8 +68,9 @@ The parser extracts the most useful package-level fields and cleans them for rea
 3. In the app:
    - Click **Browse** or drag & drop an SPDX file
    - Wait for parsing to complete
-   - View results in the table
-   - Click **Export to CSV** to save
+   - View results in the hierarchical table
+   - Expand and collapse dependency trees
+   - Click **Export to CSV** to save the formatted list
 
 ## Supported SPDX Formats
 
