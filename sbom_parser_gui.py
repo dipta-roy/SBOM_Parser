@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Title 			: SPDX SBOM Parser
 # Conceptualized by : Dipta Roy
-# Released On 		: 18-February-2026
+# Released On 		: 01-July-2026
 # Usage 			: python sbom_parser_gui.py
 # ──────────────────────────────────────────────────────────────────────────────
 # ──────────────────────────────────────────────────────────────────────────────
@@ -63,13 +63,21 @@ def parse_spdx_json(input_file):
                                             package.get('externalRefs', []))
         })
     
+    forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
+    reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
     relationships = []
     for rel in sbom_data.get('relationships', []):
         rel_type = rel.get('relationshipType', '')
-        if rel_type in ('DEPENDS_ON', 'CONTAINS'):
+        if rel_type in forward_rels:
             relationships.append({
                 'parent': rel.get('spdxElementId'),
                 'child': rel.get('relatedSpdxElement'),
+                'type': rel_type
+            })
+        elif rel_type in reverse_rels:
+            relationships.append({
+                'parent': rel.get('relatedSpdxElement'),
+                'child': rel.get('spdxElementId'),
                 'type': rel_type
             })
 
@@ -94,10 +102,18 @@ def parse_spdx_tv(input_file):
             parts = line.split(':', 1)[1].strip().split()
             if len(parts) >= 3:
                 rel_type = parts[1]
-                if rel_type in ('DEPENDS_ON', 'CONTAINS'):
+                forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
+                reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
+                if rel_type in forward_rels:
                     relationships.append({
                         'parent': parts[0],
                         'child': parts[2],
+                        'type': rel_type
+                    })
+                elif rel_type in reverse_rels:
+                    relationships.append({
+                        'parent': parts[2],
+                        'child': parts[0],
                         'type': rel_type
                     })
             continue
@@ -192,17 +208,26 @@ def parse_spdx_xml(input_file):
             'Package_Manager_Locator' : extract_package_manager_locator(ext_refs)
         })
 
+    forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
+    reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
     relationships = []
     for rel in root.iter(f'{ns}relationship'):
         r_type = rel.find(f'{ns}relationshipType')
         parent = rel.find(f'{ns}spdxElementId')
         child = rel.find(f'{ns}relatedSpdxElement')
         if r_type is not None and parent is not None and child is not None:
-            if r_type.text.strip() in ('DEPENDS_ON', 'CONTAINS'):
+            rtype_text = r_type.text.strip()
+            if rtype_text in forward_rels:
                 relationships.append({
                     'parent': parent.text.strip(),
                     'child': child.text.strip(),
-                    'type': r_type.text.strip()
+                    'type': rtype_text
+                })
+            elif rtype_text in reverse_rels:
+                relationships.append({
+                    'parent': child.text.strip(),
+                    'child': parent.text.strip(),
+                    'type': rtype_text
                 })
 
     return components, relationships
@@ -399,7 +424,7 @@ class SBOMParserApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title('SPDX SBOM Parser v1.0')
+        self.title('SPDX SBOM Parser v2.0')
         self.geometry('1150x800')
         self.minsize(950, 660)
         self.configure(bg=COLORS['bg'])
@@ -489,7 +514,7 @@ class SBOMParserApp(tk.Tk):
         tk.Label(title_f, text='SPDX SBOM Parser',
                  bg=COLORS['surface'], fg=COLORS['text'],
                  font=FONTS['title']).pack(side='left')
-        tk.Label(title_f, text='  v1.0',
+        tk.Label(title_f, text='  v2.0',
                  bg=COLORS['surface'], fg=COLORS['text_dim'],
                  font=FONTS['body']).pack(side='left', pady=(6, 0))
 
@@ -1004,7 +1029,7 @@ class SBOMParserApp(tk.Tk):
             if v and v != 'N/A'
         )
         self._detail_text.configure(state='normal')
-        self._detail_text.delete('1.0', 'end')
+        self._detail_text.delete('2.0', 'end')
         self._detail_text.insert('end', lines or 'No data available.')
         self._detail_text.configure(state='disabled')
 
@@ -1069,7 +1094,7 @@ class SBOMParserApp(tk.Tk):
         self._stat_licenses.set(0)
 
         self._detail_text.configure(state='normal')
-        self._detail_text.delete('1.0', 'end')
+        self._detail_text.delete('2.0', 'end')
         self._detail_text.configure(state='disabled')
 
         self._set_status('Cleared — ready for a new file.', COLORS['text_dim'])
