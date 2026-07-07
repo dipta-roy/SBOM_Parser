@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Title 			: SBOM Parser
 # Conceptualized by : Dipta Roy
-# Released On 		: 01-July-2026
+# Released On 		: 08-July-2026
 # Usage 			: python SBOM_Parser_GUI.py
 # ──────────────────────────────────────────────────────────────────────────────
 # ──────────────────────────────────────────────────────────────────────────────
@@ -298,9 +298,9 @@ def parse_sbom(input_file):
 
 def save_to_csv(components, output_file):
     fieldnames = [
-        'Tree_ID', 'SPDX_ID', 'Name', 'Version', 'Supplier',
+        'Name', 'Version', 'Tree_ID', 'Relation_Type', 'Supplier',
         'License_Declared', 'Copyright_Text', 'Download_Location',
-        'Homepage', 'Description', 'Package_Manager_Locator'
+        'Description', 'Package_Manager_Locator', 'SPDX_ID'
     ]
     formatted_components = []
     for comp in components:
@@ -348,14 +348,14 @@ FONTS = {
 }
 
 COLUMNS = (
-    'Tree_ID', 'SPDX_ID', 'Name', 'Version', 'Supplier',
-    'License_Declared', 'Copyright_Text',
-    'Download_Location', 'Homepage',
-    'Description', 'Package_Manager_Locator'
+    'Name', 'Version', 'Tree_ID', 'Relation_Type', 'Supplier',
+    'License_Declared', 'Copyright_Text', 'Download_Location',
+    'Description', 'Package_Manager_Locator', 'SPDX_ID'
 )
 
 COL_WIDTHS = {
-    'Tree_ID'                 : 80,
+    'Tree_ID'                 : 120,
+    'Relation_Type'           : 90,
     'SPDX_ID'                 : 120,
     'Name'                    : 130,
     'Version'                 : 70,
@@ -363,7 +363,6 @@ COL_WIDTHS = {
     'License_Declared'        : 110,
     'Copyright_Text'          : 130,
     'Download_Location'       : 140,
-    'Homepage'                : 110,
     'Description'             : 130,
     'Package_Manager_Locator' : 180,
 }
@@ -476,7 +475,7 @@ class SBOMParserApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title('SBOM Parser v3.0')
+        self.title('SBOM Parser v3.1')
         self.geometry('1150x800')
         self.minsize(950, 660)
         self.configure(bg=COLORS['bg'])
@@ -566,7 +565,7 @@ class SBOMParserApp(tk.Tk):
         tk.Label(title_f, text='SPDX SBOM Parser',
                  bg=COLORS['surface'], fg=COLORS['text'],
                  font=FONTS['title']).pack(side='left')
-        tk.Label(title_f, text='  v3.0',
+        tk.Label(title_f, text='  v3.1',
                  bg=COLORS['surface'], fg=COLORS['text_dim'],
                  font=FONTS['body']).pack(side='left', pady=(6, 0))
 
@@ -911,12 +910,15 @@ class SBOMParserApp(tk.Tk):
         if not relationships:
             for c in components:
                 c['depth'] = 0
+                c['Tree_ID'] = '1'  # simple fallback
+                c['Relation_Type'] = 'Root'
             return components
 
         comp_map = {c['SPDX_ID']: c for c in components}
         children = {c['SPDX_ID']: [] for c in components}
         parents = {c['SPDX_ID']: [] for c in components}
-        
+
+        # Build graph
         for rel in relationships:
             p = rel['parent']
             c = rel['child']
@@ -926,29 +928,58 @@ class SBOMParserApp(tk.Tk):
                 if p not in parents[c]:
                     parents[c].append(p)
 
-        roots = [c_id for c_id in comp_map if not parents[c_id]]
+        # === IMPROVED ROOT DETECTION ===
+        roots = []
+        seen = set()
+        for c_id in comp_map:
+            if c_id in seen:
+                continue
+            # True roots or SBOM descriptors
+            if not parents[c_id] or any(r.get('type') in ('DESCRIBES', 'PACKAGE_OF') 
+                                       for r in relationships if r.get('parent') == c_id):
+                roots.append(c_id)
+                seen.add(c_id)
+
         if not roots:
             roots = list(comp_map.keys())
+
+        # Remove duplicates while preserving order
+        roots = list(dict.fromkeys(roots))
 
         result = []
         visited = set()
 
-        def dfs(c_id, parent_id, depth, tree_id):
-            if c_id in visited:
-                return
+        def dfs(c_id, parent_id, depth, tree_id, path_set=None):
+            if path_set is None:
+                path_set = set()
+
+            if c_id in path_set:
+                return  # Cycle detected - stop this branch
+
+            path_set.add(c_id)
             visited.add(c_id)
+
             comp = comp_map[c_id].copy()
             comp['depth'] = depth
             comp['tree_parent'] = parent_id
             comp['Tree_ID'] = tree_id
+            comp['Relation_Type'] = 'Direct' if depth == 1 else 'Transitive' if depth > 1 else 'Root'
             result.append(comp)
-            
-            for idx, child_id in enumerate(children.get(c_id, []), start=1):
-                dfs(child_id, c_id, depth + 1, f"{tree_id}.{idx}")
 
+            # Sort children: leaf nodes first, nodes with sub-dependencies last
+            child_list = sorted(
+                children.get(c_id, []),
+                key=lambda x: (bool(children.get(x, [])), comp_map[x].get('Name', '').lower())
+            )
+            for idx, child_id in enumerate(child_list, start=1):
+                new_id = f"{tree_id}.{idx}" if tree_id else str(idx)
+                dfs(child_id, c_id, depth + 1, new_id, path_set.copy())
+
+        # Build tree from roots
         for idx, r_id in enumerate(roots, start=1):
             dfs(r_id, '', 0, str(idx))
-            
+
+        # Handle any remaining unvisited components
         unvisited = [c_id for c_id in comp_map if c_id not in visited]
         for idx, c_id in enumerate(unvisited, start=len(roots) + 1):
             dfs(c_id, '', 0, str(idx))
@@ -1032,21 +1063,41 @@ class SBOMParserApp(tk.Tk):
                 COLORS['text_dim'])
             return
 
-        col_keys = list(COLUMNS)
-        filtered = []
+        # Support '+' operator for AND filtering (e.g., "json5+2.2.3")
+        terms = [t.strip() for t in query.split('+') if t.strip()]
+
+        # Find all matching components and collect their Tree_IDs
+        needed_tree_ids = set()
+        match_count = 0
         for comp in self._components:
-            values = list(comp.values())
             if col == 'All':
-                match = any(query in str(v).lower() for v in values)
+                # Each term must appear in at least one column value
+                match = all(
+                    any(term in str(v).lower()
+                        for k, v in comp.items() if k in COLUMNS)
+                    for term in terms
+                )
             else:
-                idx   = col_keys.index(col) if col in col_keys else 0
-                match = query in str(values[idx]).lower()
+                # All terms must appear in the selected column
+                col_val = str(comp.get(col, '')).lower()
+                match = all(term in col_val for term in terms)
             if match:
-                filtered.append(comp)
+                match_count += 1
+                tree_id = comp.get('Tree_ID', '')
+                needed_tree_ids.add(tree_id)
+                # Include all ancestors (e.g., "2.1.2" → "2.1", "2")
+                parts = tree_id.split('.')
+                for i in range(1, len(parts)):
+                    needed_tree_ids.add('.'.join(parts[:i]))
+
+        # Build filtered list preserving original DFS order
+        filtered = [c for c in self._components
+                    if c.get('Tree_ID', '') in needed_tree_ids]
 
         self._populate_table(filtered)
         self._set_status(
-            f'Filter: {len(filtered)} of {len(self._components)} shown.',
+            f'Filter: {match_count} matches ({len(filtered)} shown with ancestors) '
+            f'of {len(self._components)} total.',
             COLORS['secondary'])
 
     # ── sort ──────────────────────────────────────────────────────────────────
@@ -1082,7 +1133,7 @@ class SBOMParserApp(tk.Tk):
             if v and v != 'N/A'
         )
         self._detail_text.configure(state='normal')
-        self._detail_text.delete('3.0', 'end')
+        self._detail_text.delete('1.0', 'end')
         self._detail_text.insert('end', lines or 'No data available.')
         self._detail_text.configure(state='disabled')
 
@@ -1147,7 +1198,7 @@ class SBOMParserApp(tk.Tk):
         self._stat_licenses.set(0)
 
         self._detail_text.configure(state='normal')
-        self._detail_text.delete('3.0', 'end')
+        self._detail_text.delete('1.0', 'end')
         self._detail_text.configure(state='disabled')
 
         self._set_status('Cleared — ready for a new file.', COLORS['text_dim'])
