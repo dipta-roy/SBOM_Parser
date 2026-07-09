@@ -17,6 +17,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import xml.etree.ElementTree as ET
 
+# Application Version
+VERSION = '4.0'
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PARSING LOGIC
@@ -46,8 +48,11 @@ def parse_spdx_json(input_file):
     with open(input_file, 'r', encoding='utf-8') as f:
         sbom_data = json.load(f)
 
+    document_describes = sbom_data.get('documentDescribes', [])
+
     components = []
     for package in sbom_data.get('packages', []):
+        spdx_id = package.get('SPDXID', 'N/A')
         components.append({
             'SPDX_ID'                 : package.get('SPDXID', 'N/A'),
             'Name'                    : package.get('name', 'N/A'),
@@ -60,7 +65,8 @@ def parse_spdx_json(input_file):
             'Homepage'                : package.get('homepage', 'N/A'),
             'Description'             : package.get('description', 'N/A'),
             'Package_Manager_Locator' : extract_package_manager_locator(
-                                            package.get('externalRefs', []))
+                                            package.get('externalRefs', [])),
+            'is_root_metadata'        : (spdx_id in document_describes)
         })
     
     forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
@@ -92,6 +98,7 @@ def parse_spdx_tv(input_file):
     current_package  = None
     current_ext_refs = []
     relationships    = []
+    describes_ids    = set()
 
     for line in lines:
         line = line.strip()
@@ -102,6 +109,8 @@ def parse_spdx_tv(input_file):
             parts = line.split(':', 1)[1].strip().split()
             if len(parts) >= 3:
                 rel_type = parts[1]
+                if rel_type == 'DESCRIBES' and parts[0] == 'SPDXRef-DOCUMENT':
+                    describes_ids.add(parts[2])
                 forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
                 reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
                 if rel_type in forward_rels:
@@ -133,7 +142,8 @@ def parse_spdx_tv(input_file):
                 'Download_Location'       : 'N/A',
                 'Homepage'                : 'N/A',
                 'Description'             : 'N/A',
-                'Package_Manager_Locator' : 'N/A'
+                'Package_Manager_Locator' : 'N/A',
+                'is_root_metadata'        : False
             }
             current_ext_refs = []
 
@@ -151,9 +161,11 @@ def parse_spdx_tv(input_file):
             for tag, key in tag_map.items():
                 if line.startswith(tag):
                     value = line.split(':', 1)[1].strip()
-                    if key == 'Supplier':          # ← cleaned
+                    if key == 'Supplier':
                         value = clean_supplier(value)
                     current_package[key] = value
+                    if key == 'SPDX_ID' and value in describes_ids:
+                        current_package['is_root_metadata'] = True
                     break
 
             if line.startswith('ExternalRef:'):
@@ -179,6 +191,15 @@ def parse_spdx_xml(input_file):
     ns   = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
 
     components = []
+    document_describes = set()
+    for rel in root.iter(f'{ns}relationship'):
+        r_type = rel.find(f'{ns}relationshipType')
+        parent = rel.find(f'{ns}spdxElementId')
+        child = rel.find(f'{ns}relatedSpdxElement')
+        if r_type is not None and parent is not None and child is not None:
+            if r_type.text.strip() == 'DESCRIBES' and parent.text.strip() == 'SPDXRef-DOCUMENT':
+                document_describes.add(child.text.strip())
+
     for package in root.findall(f'{ns}packages') or root.findall(f'{ns}package'):
         def get_text(tag):
             el = package.find(f'{ns}{tag}')
@@ -198,14 +219,15 @@ def parse_spdx_xml(input_file):
             'SPDX_ID'                 : get_text('SPDXID'),
             'Name'                    : get_text('name'),
             'Version'                 : get_text('versionInfo'),
-            'Supplier'                : clean_supplier(            # ← cleaned
+            'Supplier'                : clean_supplier( 
                                             get_text('supplier')),
             'License_Declared'        : get_text('licenseDeclared'),
             'Copyright_Text'          : get_text('copyrightText'),
             'Download_Location'       : get_text('downloadLocation'),
             'Homepage'                : get_text('homepage'),
             'Description'             : get_text('description'),
-            'Package_Manager_Locator' : extract_package_manager_locator(ext_refs)
+            'Package_Manager_Locator' : extract_package_manager_locator(ext_refs),
+            'is_root_metadata'        : (get_text('SPDXID') in document_describes)
         })
 
     forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
@@ -237,8 +259,15 @@ def parse_cyclonedx_json(input_file):
     with open(input_file, 'r', encoding='utf-8') as f:
         sbom_data = json.load(f)
 
+    raw_components = sbom_data.get('components', [])
+    meta_comp = sbom_data.get('metadata', {}).get('component')
+    if meta_comp:
+        raw_components = [meta_comp] + raw_components
+
+    import urllib.parse
+    
     components = []
-    for comp in sbom_data.get('components', []):
+    for i, comp in enumerate(raw_components):
         license_decl = 'N/A'
         licenses = comp.get('licenses', [])
         if licenses:
@@ -251,8 +280,13 @@ def parse_cyclonedx_json(input_file):
         if sup_dict and isinstance(sup_dict, dict):
             supplier = sup_dict.get('name', 'N/A')
 
+        bom_ref = comp.get('bom-ref')
+        if not bom_ref:
+            bom_ref = purl if purl != 'N/A' else f"gen-id-{i}-{comp.get('name', 'unknown')}"
+        bom_ref = urllib.parse.unquote(bom_ref)
+
         components.append({
-            'SPDX_ID'                 : comp.get('bom-ref', 'N/A'),
+            'SPDX_ID'                 : bom_ref,
             'Name'                    : comp.get('name', 'N/A'),
             'Version'                 : comp.get('version', 'N/A'),
             'Supplier'                : clean_supplier(supplier),
@@ -261,13 +295,16 @@ def parse_cyclonedx_json(input_file):
             'Download_Location'       : 'N/A',
             'Homepage'                : 'N/A',
             'Description'             : comp.get('description', 'N/A'),
-            'Package_Manager_Locator' : purl
+            'Package_Manager_Locator' : purl,
+            'is_root_metadata'        : (i == 0 and meta_comp is not None)
         })
 
     relationships = []
     for dep in sbom_data.get('dependencies', []):
-        parent_ref = dep.get('ref')
+        parent_ref = urllib.parse.unquote(dep.get('ref', ''))
+        if not parent_ref: continue
         for child_ref in dep.get('dependsOn', []):
+            child_ref = urllib.parse.unquote(child_ref)
             relationships.append({
                 'parent': parent_ref,
                 'child': child_ref,
@@ -475,31 +512,22 @@ class SBOMParserApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title('SBOM Parser v3.1')
+        self.title(f'SBOM Parser v{VERSION}')
         self.geometry('1150x800')
         self.minsize(950, 660)
         self.configure(bg=COLORS['bg'])
 
-        # ── state ─────────────────────────────────────────────────────────────
         self._components   : list = []
         self._sort_reverse : dict = {col: False for col in COLUMNS}
-
-        # ── tk variables (ALL created before _build_ui) ───────────────────────
         self._input_path  = tk.StringVar()
         self._output_path = tk.StringVar()
         self._status_msg  = tk.StringVar(
             value='Ready — load an SBOM file to begin.')
         self._filter_var  = tk.StringVar()
         self._filter_col  = tk.StringVar(value='All')
-
-        # ── build UI ──────────────────────────────────────────────────────────
         self._setup_styles()
         self._build_ui()
-
-        # ── attach filter trace AFTER all widgets exist ───────────────────────
         self._filter_var.trace_add('write', self._apply_filter)
-
-    # ── ttk styles ────────────────────────────────────────────────────────────
 
     def _setup_styles(self):
         style = ttk.Style(self)
@@ -542,36 +570,28 @@ class SBOMParserApp(tk.Tk):
                   fieldbackground=[('readonly', COLORS['surface2'])],
                   foreground      =[('readonly', COLORS['text'])])
 
-    # ── top-level layout ──────────────────────────────────────────────────────
-
     def _build_ui(self):
         self._build_header()
         self._build_body()
         self._build_statusbar()
 
-    # ── header ────────────────────────────────────────────────────────────────
-
     def _build_header(self):
         hdr = tk.Frame(self, bg=COLORS['surface'], height=70)
         hdr.pack(fill='x', side='top')
         hdr.pack_propagate(False)
-
         title_f = tk.Frame(hdr, bg=COLORS['surface'])
         title_f.pack(side='left', padx=20, pady=10)
-
         tk.Label(title_f, text='⬡',
                  bg=COLORS['surface'], fg=COLORS['primary'],
                  font=('Segoe UI', 22, 'bold')).pack(side='left', padx=(0, 8))
         tk.Label(title_f, text='SPDX SBOM Parser',
                  bg=COLORS['surface'], fg=COLORS['text'],
                  font=FONTS['title']).pack(side='left')
-        tk.Label(title_f, text='  v3.1',
+        tk.Label(title_f, text=f'  v{VERSION}',
                  bg=COLORS['surface'], fg=COLORS['text_dim'],
                  font=FONTS['body']).pack(side='left', pady=(6, 0))
 
         tk.Frame(self, bg=COLORS['border'], height=1).pack(fill='x')
-
-    # ── body ──────────────────────────────────────────────────────────────────
 
     def _build_body(self):
         body = tk.Frame(self, bg=COLORS['bg'])
@@ -585,8 +605,6 @@ class SBOMParserApp(tk.Tk):
         right = tk.Frame(body, bg=COLORS['bg'])
         right.pack(side='left', fill='both', expand=True)
         self._build_right_panel(right)
-
-    # ── left panel ────────────────────────────────────────────────────────────
 
     def _build_left_panel(self, parent):
         file_card = self._make_card(parent, '📂  File Selection')
@@ -627,18 +645,15 @@ class SBOMParserApp(tk.Tk):
         self._progress = ttk.Progressbar(prog_card, mode='indeterminate',
                                          style='TProgressbar')
         self._progress.pack(fill='x', padx=12, pady=10)
-
         stat_card = self._make_card(parent, '📊  Statistics')
         stat_card.pack(fill='x')
         grid = tk.Frame(stat_card, bg=COLORS['surface'])
         grid.pack(fill='x', padx=12, pady=10)
         grid.columnconfigure((0, 1), weight=1)
-
         self._stat_total    = StatCard(grid, 'Total',     accent=COLORS['primary'])
         self._stat_purl     = StatCard(grid, 'With PURL', accent=COLORS['secondary'])
         self._stat_no_purl  = StatCard(grid, 'No PURL',   accent=COLORS['warning'])
         self._stat_licenses = StatCard(grid, 'Licenses',  accent=COLORS['success'])
-
         self._stat_total.grid(   row=0, column=0, padx=4, pady=4, sticky='nsew')
         self._stat_purl.grid(    row=0, column=1, padx=4, pady=4, sticky='nsew')
         self._stat_no_purl.grid( row=1, column=0, padx=4, pady=4, sticky='nsew')
@@ -666,8 +681,6 @@ class SBOMParserApp(tk.Tk):
                   relief='flat', font=FONTS['small'],
                   cursor='hand2', command=browse_cmd,
                   padx=8, pady=4).pack(side='left')
-
-    # ── right panel ───────────────────────────────────────────────────────────
 
     def _build_right_panel(self, parent):
         self._build_filter_bar(parent)
@@ -781,8 +794,6 @@ class SBOMParserApp(tk.Tk):
             highlightthickness=0)
         self._detail_text.pack(fill='x', padx=10, pady=(0, 8))
 
-    # ── status bar ────────────────────────────────────────────────────────────
-
     def _build_statusbar(self):
         tk.Frame(self, bg=COLORS['border'], height=1).pack(fill='x')
         bar = tk.Frame(self, bg=COLORS['surface'], height=28)
@@ -805,8 +816,6 @@ class SBOMParserApp(tk.Tk):
         self._time_label.pack(side='right', padx=10)
         self._tick_clock()
 
-    # ── helpers ───────────────────────────────────────────────────────────────
-
     def _make_card(self, parent, title):
         outer = tk.Frame(parent, bg=COLORS['surface'],
                          highlightbackground=COLORS['border'],
@@ -825,8 +834,6 @@ class SBOMParserApp(tk.Tk):
         self._time_label.configure(
             text=datetime.now().strftime('%Y-%m-%d  %H:%M:%S'))
         self.after(1000, self._tick_clock)
-
-    # ── filter helpers ────────────────────────────────────────────────────────
 
     def _filter_focus_in(self, _):
         if self._filter_entry.get() == self._FILTER_PLACEHOLDER:
@@ -847,8 +854,6 @@ class SBOMParserApp(tk.Tk):
         self._set_status(
             f'Filter cleared — showing all {len(self._components)} components.',
             COLORS['text_dim'])
-
-    # ── file browsing ─────────────────────────────────────────────────────────
 
     def _browse_input(self):
         path = filedialog.askopenfilename(
@@ -877,8 +882,6 @@ class SBOMParserApp(tk.Tk):
             filetypes=[('CSV Files', '*.csv'), ('All Files', '*.*')])
         if path:
             self._output_path.set(path)
-
-    # ── parsing ───────────────────────────────────────────────────────────────
 
     def _start_parse(self):
         input_file = self._input_path.get().strip()
@@ -910,7 +913,7 @@ class SBOMParserApp(tk.Tk):
         if not relationships:
             for c in components:
                 c['depth'] = 0
-                c['Tree_ID'] = '1'  # simple fallback
+                c['Tree_ID'] = '1'
                 c['Relation_Type'] = 'Root'
             return components
 
@@ -918,7 +921,6 @@ class SBOMParserApp(tk.Tk):
         children = {c['SPDX_ID']: [] for c in components}
         parents = {c['SPDX_ID']: [] for c in components}
 
-        # Build graph
         for rel in relationships:
             p = rel['parent']
             c = rel['child']
@@ -927,14 +929,11 @@ class SBOMParserApp(tk.Tk):
                     children[p].append(c)
                 if p not in parents[c]:
                     parents[c].append(p)
-
-        # === IMPROVED ROOT DETECTION ===
         roots = []
         seen = set()
         for c_id in comp_map:
             if c_id in seen:
                 continue
-            # True roots or SBOM descriptors
             if not parents[c_id] or any(r.get('type') in ('DESCRIBES', 'PACKAGE_OF') 
                                        for r in relationships if r.get('parent') == c_id):
                 roots.append(c_id)
@@ -942,9 +941,14 @@ class SBOMParserApp(tk.Tk):
 
         if not roots:
             roots = list(comp_map.keys())
-
-        # Remove duplicates while preserving order
         roots = list(dict.fromkeys(roots))
+        metadata_root_id = next((c['SPDX_ID'] for c in components if c.get('is_root_metadata')), None)
+        if metadata_root_id and metadata_root_id in roots and len(roots) > 1:
+            for r_id in roots:
+                if r_id != metadata_root_id:
+                    children[metadata_root_id].append(r_id)
+                    parents[r_id].append(metadata_root_id)
+            roots = [metadata_root_id]
 
         result = []
         visited = set()
@@ -954,19 +958,15 @@ class SBOMParserApp(tk.Tk):
                 path_set = set()
 
             if c_id in path_set:
-                return  # Cycle detected - stop this branch
-
+                return
             path_set.add(c_id)
             visited.add(c_id)
-
             comp = comp_map[c_id].copy()
             comp['depth'] = depth
             comp['tree_parent'] = parent_id
             comp['Tree_ID'] = tree_id
             comp['Relation_Type'] = 'Direct' if depth == 1 else 'Transitive' if depth > 1 else 'Root'
             result.append(comp)
-
-            # Sort children: leaf nodes first, nodes with sub-dependencies last
             child_list = sorted(
                 children.get(c_id, []),
                 key=lambda x: (bool(children.get(x, [])), comp_map[x].get('Name', '').lower())
@@ -974,16 +974,11 @@ class SBOMParserApp(tk.Tk):
             for idx, child_id in enumerate(child_list, start=1):
                 new_id = f"{tree_id}.{idx}" if tree_id else str(idx)
                 dfs(child_id, c_id, depth + 1, new_id, path_set.copy())
-
-        # Build tree from roots
         for idx, r_id in enumerate(roots, start=1):
             dfs(r_id, '', 0, str(idx))
-
-        # Handle any remaining unvisited components
         unvisited = [c_id for c_id in comp_map if c_id not in visited]
         for idx, c_id in enumerate(unvisited, start=len(roots) + 1):
             dfs(c_id, '', 0, str(idx))
-
         return result
 
     def _on_parse_success(self, components, relationships):
@@ -1003,8 +998,6 @@ class SBOMParserApp(tk.Tk):
         self._set_status(f'✖  Error: {error}', COLORS['error'])
         messagebox.showerror('Parse Error',
                              f'Failed to parse SBOM:\n\n{error}')
-
-    # ── table ─────────────────────────────────────────────────────────────────
 
     def _populate_table(self, components):
         self._clear_table()
@@ -1044,8 +1037,6 @@ class SBOMParserApp(tk.Tk):
         self._stat_no_purl.set(total - with_p)
         self._stat_licenses.set(licenses)
 
-    # ── filter ────────────────────────────────────────────────────────────────
-
     def _apply_filter(self, *_):
         if not hasattr(self, '_filter_col') or not hasattr(self, '_tree'):
             return
@@ -1062,35 +1053,27 @@ class SBOMParserApp(tk.Tk):
                 f'Showing all {len(self._components)} components.',
                 COLORS['text_dim'])
             return
-
-        # Support '+' operator for AND filtering (e.g., "json5+2.2.3")
         terms = [t.strip() for t in query.split('+') if t.strip()]
-
-        # Find all matching components and collect their Tree_IDs
         needed_tree_ids = set()
         match_count = 0
         for comp in self._components:
             if col == 'All':
-                # Each term must appear in at least one column value
                 match = all(
                     any(term in str(v).lower()
                         for k, v in comp.items() if k in COLUMNS)
                     for term in terms
                 )
             else:
-                # All terms must appear in the selected column
                 col_val = str(comp.get(col, '')).lower()
                 match = all(term in col_val for term in terms)
             if match:
                 match_count += 1
                 tree_id = comp.get('Tree_ID', '')
                 needed_tree_ids.add(tree_id)
-                # Include all ancestors (e.g., "2.1.2" → "2.1", "2")
                 parts = tree_id.split('.')
                 for i in range(1, len(parts)):
                     needed_tree_ids.add('.'.join(parts[:i]))
 
-        # Build filtered list preserving original DFS order
         filtered = [c for c in self._components
                     if c.get('Tree_ID', '') in needed_tree_ids]
 
@@ -1099,8 +1082,6 @@ class SBOMParserApp(tk.Tk):
             f'Filter: {match_count} matches ({len(filtered)} shown with ancestors) '
             f'of {len(self._components)} total.',
             COLORS['secondary'])
-
-    # ── sort ──────────────────────────────────────────────────────────────────
 
     def _sort_column(self, col):
         reverse = self._sort_reverse.get(col, False)
@@ -1120,8 +1101,6 @@ class SBOMParserApp(tk.Tk):
             self._tree.item(child, tags=new_tags)
         self._sort_reverse[col] = not reverse
 
-    # ── row detail ────────────────────────────────────────────────────────────
-
     def _on_row_select(self, _):
         selected = self._tree.selection()
         if not selected or not self._components:
@@ -1136,8 +1115,6 @@ class SBOMParserApp(tk.Tk):
         self._detail_text.delete('1.0', 'end')
         self._detail_text.insert('end', lines or 'No data available.')
         self._detail_text.configure(state='disabled')
-
-    # ── save CSV ──────────────────────────────────────────────────────────────
 
     def _save_csv(self):
         if not self._components:
@@ -1179,30 +1156,23 @@ class SBOMParserApp(tk.Tk):
         else:
             os.system(f'xdg-open "{path}"')
 
-    # ── clear all ─────────────────────────────────────────────────────────────
-
     def _clear(self):
         self._components = []
         self._clear_table()
         self._input_path.set('')
         self._output_path.set('')
         self._filter_col.set('All')
-
         self._filter_entry.delete(0, 'end')
         self._filter_entry.insert(0, self._FILTER_PLACEHOLDER)
         self._filter_entry.configure(fg=COLORS['text_dim'])
-
         self._stat_total.set(0)
         self._stat_purl.set(0)
         self._stat_no_purl.set(0)
         self._stat_licenses.set(0)
-
         self._detail_text.configure(state='normal')
         self._detail_text.delete('1.0', 'end')
         self._detail_text.configure(state='disabled')
-
         self._set_status('Cleared — ready for a new file.', COLORS['text_dim'])
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT

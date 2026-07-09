@@ -1,4 +1,4 @@
-# SBOM Parser GUI
+# SBOM Parser GUI (v4.0)
 
 A clean, modern desktop GUI tool to parse **SPDX and CycloneDX SBOM files** (Software Bill of Materials) and export them to CSV.
 
@@ -15,7 +15,7 @@ The parser extracts the most useful package-level fields and cleans them for rea
 
 ## Features
 
-- Drag & drop or browse to select SPDX file
+- Browse to select SPDX or CycloneDX SBOM files
 - Hierarchical tree-view displaying direct and transitive dependencies
 - Table view of all extracted components/packages with collapsible tree nodes
 - Cleaned supplier names (removes "Person:", "Organization:", "Tool:" prefixes)
@@ -66,7 +66,7 @@ The parser extracts the most useful package-level fields and cleans them for rea
    ```
 
 3. In the app:
-   - Click **Browse** or drag & drop an SPDX file
+   - Click **Browse** to select an SBOM file
    - Wait for parsing to complete
    - View results in the hierarchical table
    - Expand and collapse dependency trees
