@@ -953,7 +953,7 @@ class SBOMParserApp(tk.Tk):
         result = []
         visited = set()
 
-        def dfs(c_id, parent_id, depth, tree_id, path_set=None):
+        def dfs(c_id, parent_id, depth, tree_id, path_set=None, parent_tree_id=''):
             if path_set is None:
                 path_set = set()
 
@@ -964,6 +964,7 @@ class SBOMParserApp(tk.Tk):
             comp = comp_map[c_id].copy()
             comp['depth'] = depth
             comp['tree_parent'] = parent_id
+            comp['tree_parent_id'] = parent_tree_id
             comp['Tree_ID'] = tree_id
             comp['Relation_Type'] = 'Direct' if depth == 1 else 'Transitive' if depth > 1 else 'Root'
             result.append(comp)
@@ -973,12 +974,12 @@ class SBOMParserApp(tk.Tk):
             )
             for idx, child_id in enumerate(child_list, start=1):
                 new_id = f"{tree_id}.{idx}" if tree_id else str(idx)
-                dfs(child_id, c_id, depth + 1, new_id, path_set.copy())
+                dfs(child_id, c_id, depth + 1, new_id, path_set.copy(), tree_id)
         for idx, r_id in enumerate(roots, start=1):
-            dfs(r_id, '', 0, str(idx))
+            dfs(r_id, '', 0, str(idx), None, '')
         unvisited = [c_id for c_id in comp_map if c_id not in visited]
         for idx, c_id in enumerate(unvisited, start=len(roots) + 1):
-            dfs(c_id, '', 0, str(idx))
+            dfs(c_id, '', 0, str(idx), None, '')
         return result
 
     def _on_parse_success(self, components, relationships):
@@ -1010,11 +1011,11 @@ class SBOMParserApp(tk.Tk):
             
             values = [comp.get(col, '') for col in COLUMNS]
             
-            parent_spdx = comp.get('tree_parent', '')
-            parent_iid = iid_map.get(parent_spdx, '')
+            parent_tree_id = comp.get('tree_parent_id', '')
+            parent_iid = iid_map.get(parent_tree_id, '')
             
             my_iid = str(i)
-            iid_map[comp['SPDX_ID']] = my_iid
+            iid_map[comp['Tree_ID']] = my_iid
             
             self._tree.insert(parent_iid, 'end', iid=my_iid,
                               text=comp.get('Name', ''),
