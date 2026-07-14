@@ -44,293 +44,252 @@ def extract_package_manager_locator(external_refs):
     return '; '.join(locators) if locators else 'N/A'
 
 
-def parse_spdx_json(input_file):
-    with open(input_file, 'r', encoding='utf-8') as f:
-        sbom_data = json.load(f)
+def normalize_component(spdx_id, name, version, supplier, license_decl,
+                        copyright_text, download_loc, homepage, description,
+                        purl, is_root):
+    return {
+        'SPDX_ID'                 : spdx_id or 'N/A',
+        'Name'                    : name or 'N/A',
+        'Version'                 : version or 'N/A',
+        'Supplier'                : clean_supplier(supplier) if supplier else 'N/A',
+        'License_Declared'        : license_decl or 'N/A',
+        'Copyright_Text'          : copyright_text or 'N/A',
+        'Download_Location'       : download_loc or 'N/A',
+        'Homepage'                : homepage or 'N/A',
+        'Description'             : description or 'N/A',
+        'Package_Manager_Locator' : purl or 'N/A',
+        'is_root_metadata'        : is_root
+    }
 
-    document_describes = sbom_data.get('documentDescribes', [])
-
-    components = []
-    for package in sbom_data.get('packages', []):
-        spdx_id = package.get('SPDXID', 'N/A')
-        components.append({
-            'SPDX_ID'                 : package.get('SPDXID', 'N/A'),
-            'Name'                    : package.get('name', 'N/A'),
-            'Version'                 : package.get('versionInfo', 'N/A'),
-            'Supplier'                : clean_supplier(            # ← cleaned
-                                            package.get('supplier', 'N/A')),
-            'License_Declared'        : package.get('licenseDeclared', 'N/A'),
-            'Copyright_Text'          : package.get('copyrightText', 'N/A'),
-            'Download_Location'       : package.get('downloadLocation', 'N/A'),
-            'Homepage'                : package.get('homepage', 'N/A'),
-            'Description'             : package.get('description', 'N/A'),
-            'Package_Manager_Locator' : extract_package_manager_locator(
-                                            package.get('externalRefs', [])),
-            'is_root_metadata'        : (spdx_id in document_describes)
-        })
-    
-    forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
-    reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
+def map_relationships(raw_rels, get_type, get_parent, get_child):
+    forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES')
+    reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY', 'PACKAGE_OF')
     relationships = []
-    for rel in sbom_data.get('relationships', []):
-        rel_type = rel.get('relationshipType', '')
-        if rel_type in forward_rels:
-            relationships.append({
-                'parent': rel.get('spdxElementId'),
-                'child': rel.get('relatedSpdxElement'),
-                'type': rel_type
-            })
-        elif rel_type in reverse_rels:
-            relationships.append({
-                'parent': rel.get('relatedSpdxElement'),
-                'child': rel.get('spdxElementId'),
-                'type': rel_type
-            })
+    for rel in raw_rels:
+        r_type = get_type(rel)
+        parent = get_parent(rel)
+        child = get_child(rel)
+        if not (r_type and parent and child): continue
+        if r_type in forward_rels:
+            relationships.append({'parent': parent, 'child': child, 'type': r_type})
+        elif r_type in reverse_rels:
+            relationships.append({'parent': child, 'child': parent, 'type': r_type})
+    return relationships
 
-    return components, relationships
+def parse_spdx_json(input_file):
+    with open(input_file, 'r', encoding='utf-8') as f: sbom = json.load(f)
+    describes = set(sbom.get('documentDescribes', []))
+    components = []
+    for i, pkg in enumerate(sbom.get('packages', [])):
+        spdx_id = pkg.get('SPDXID') or f"gen-id-{i}-{pkg.get('name', 'unknown')}"
+        components.append(normalize_component(
+            spdx_id=spdx_id, name=pkg.get('name'), version=pkg.get('versionInfo'),
+            supplier=pkg.get('supplier'), license_decl=pkg.get('licenseDeclared'),
+            copyright_text=pkg.get('copyrightText'), download_loc=pkg.get('downloadLocation'),
+            homepage=pkg.get('homepage'), description=pkg.get('description'),
+            purl=extract_package_manager_locator(pkg.get('externalRefs', [])),
+            is_root=(spdx_id in describes)
+        ))
+    rels = map_relationships(
+        sbom.get('relationships', []),
+        lambda r: r.get('relationshipType', ''),
+        lambda r: r.get('spdxElementId'),
+        lambda r: r.get('relatedSpdxElement')
+    )
+    return components, rels
 
 
 def parse_spdx_tv(input_file):
-    with open(input_file, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-
-    components       = []
-    current_package  = None
-    current_ext_refs = []
-    relationships    = []
-    describes_ids    = set()
-
+    with open(input_file, 'r', encoding='utf-8') as f: lines = f.readlines()
+    components, rels, describes_ids = [], [], set()
+    cur_pkg, cur_refs = None, []
+    
     for line in lines:
         line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-
+        if not line or line.startswith('#'): continue
         if line.startswith('Relationship:'):
             parts = line.split(':', 1)[1].strip().split()
             if len(parts) >= 3:
-                rel_type = parts[1]
-                if rel_type == 'DESCRIBES' and parts[0] == 'SPDXRef-DOCUMENT':
-                    describes_ids.add(parts[2])
-                forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
-                reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
-                if rel_type in forward_rels:
-                    relationships.append({
-                        'parent': parts[0],
-                        'child': parts[2],
-                        'type': rel_type
-                    })
-                elif rel_type in reverse_rels:
-                    relationships.append({
-                        'parent': parts[2],
-                        'child': parts[0],
-                        'type': rel_type
-                    })
+                if parts[1] == 'DESCRIBES' and parts[0] == 'SPDXRef-DOCUMENT': describes_ids.add(parts[2])
+                rels.extend(map_relationships([parts], lambda r: r[1], lambda r: r[0], lambda r: r[2]))
             continue
-
+            
         if line.startswith('PackageName:'):
-            if current_package is not None:
-                current_package['Package_Manager_Locator'] = \
-                    extract_package_manager_locator(current_ext_refs)
-                components.append(current_package)
-            current_package = {
-                'SPDX_ID'                 : 'N/A',
-                'Name'                    : line.split(':', 1)[1].strip(),
-                'Version'                 : 'N/A',
-                'Supplier'                : 'N/A',
-                'License_Declared'        : 'N/A',
-                'Copyright_Text'          : 'N/A',
-                'Download_Location'       : 'N/A',
-                'Homepage'                : 'N/A',
-                'Description'             : 'N/A',
-                'Package_Manager_Locator' : 'N/A',
-                'is_root_metadata'        : False
-            }
-            current_ext_refs = []
-
-        elif current_package is not None:
-            tag_map = {
-                'SPDXID:'                  : 'SPDX_ID',
-                'PackageVersion:'          : 'Version',
-                'PackageSupplier:'         : 'Supplier',
-                'PackageLicenseDeclared:'  : 'License_Declared',
-                'PackageCopyrightText:'    : 'Copyright_Text',
-                'PackageDownloadLocation:' : 'Download_Location',
-                'PackageHomePage:'         : 'Homepage',
-                'PackageDescription:'      : 'Description',
-            }
+            if cur_pkg:
+                cur_pkg['Package_Manager_Locator'] = extract_package_manager_locator(cur_refs)
+                components.append(cur_pkg)
+            name = line.split(':', 1)[1].strip()
+            cur_pkg = normalize_component(f"gen-id-{len(components)}-{name}", name, *[None]*8, False)
+            cur_refs = []
+            
+        elif cur_pkg:
+            tag_map = {'SPDXID:': 'SPDX_ID', 'PackageVersion:': 'Version', 'PackageSupplier:': 'Supplier',
+                       'PackageLicenseDeclared:': 'License_Declared', 'PackageCopyrightText:': 'Copyright_Text',
+                       'PackageDownloadLocation:': 'Download_Location', 'PackageHomePage:': 'Homepage',
+                       'PackageDescription:': 'Description'}
             for tag, key in tag_map.items():
                 if line.startswith(tag):
-                    value = line.split(':', 1)[1].strip()
-                    if key == 'Supplier':
-                        value = clean_supplier(value)
-                    current_package[key] = value
-                    if key == 'SPDX_ID' and value in describes_ids:
-                        current_package['is_root_metadata'] = True
+                    val = line.split(':', 1)[1].strip()
+                    if key == 'Supplier': val = clean_supplier(val)
+                    cur_pkg[key] = val
+                    if key == 'SPDX_ID' and val in describes_ids: cur_pkg['is_root_metadata'] = True
                     break
-
             if line.startswith('ExternalRef:'):
                 parts = line.split(':', 1)[1].strip().split()
-                if len(parts) >= 3:
-                    current_ext_refs.append({
-                        'referenceCategory' : parts[0],
-                        'referenceType'     : parts[1],
-                        'referenceLocator'  : parts[2]
-                    })
-
-    if current_package is not None:
-        current_package['Package_Manager_Locator'] = \
-            extract_package_manager_locator(current_ext_refs)
-        components.append(current_package)
-
-    return components, relationships
+                if len(parts) >= 3: cur_refs.append({'referenceCategory': parts[0], 'referenceLocator': parts[2]})
+                
+    if cur_pkg:
+        cur_pkg['Package_Manager_Locator'] = extract_package_manager_locator(cur_refs)
+        components.append(cur_pkg)
+    return components, rels
 
 
 def parse_spdx_xml(input_file):
     tree = ET.parse(input_file)
     root = tree.getroot()
-    ns   = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
+    ns = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
+
+    describes = set()
+    for rel in root.iter(f'{ns}relationship'):
+        rt = rel.find(f'{ns}relationshipType')
+        p = rel.find(f'{ns}spdxElementId')
+        c = rel.find(f'{ns}relatedSpdxElement')
+        if rt is not None and p is not None and c is not None:
+            if rt.text.strip() == 'DESCRIBES' and p.text.strip() == 'SPDXRef-DOCUMENT': describes.add(c.text.strip())
 
     components = []
-    document_describes = set()
-    for rel in root.iter(f'{ns}relationship'):
-        r_type = rel.find(f'{ns}relationshipType')
-        parent = rel.find(f'{ns}spdxElementId')
-        child = rel.find(f'{ns}relatedSpdxElement')
-        if r_type is not None and parent is not None and child is not None:
-            if r_type.text.strip() == 'DESCRIBES' and parent.text.strip() == 'SPDXRef-DOCUMENT':
-                document_describes.add(child.text.strip())
-
-    for package in root.findall(f'{ns}packages') or root.findall(f'{ns}package'):
+    for i, package in enumerate(root.findall(f'{ns}packages') or root.findall(f'{ns}package')):
         def get_text(tag):
             el = package.find(f'{ns}{tag}')
-            return el.text.strip() if el is not None and el.text else 'N/A'
+            return el.text.strip() if el is not None and el.text else None
+
+        spdx_id = get_text('SPDXID') or f"gen-id-{i}-{get_text('name')}"
 
         ext_refs = []
-        for ref in (package.findall(f'{ns}externalRefs') or
-                    package.findall(f'{ns}externalRef')):
+        for ref in (package.findall(f'{ns}externalRefs') or package.findall(f'{ns}externalRef')):
             cat = ref.find(f'{ns}referenceCategory')
             loc = ref.find(f'{ns}referenceLocator')
-            ext_refs.append({
-                'referenceCategory' : cat.text.strip() if cat is not None else '',
-                'referenceLocator'  : loc.text.strip() if loc is not None else ''
-            })
+            if cat is not None and loc is not None:
+                ext_refs.append({'referenceCategory': cat.text.strip(), 'referenceLocator': loc.text.strip()})
 
-        components.append({
-            'SPDX_ID'                 : get_text('SPDXID'),
-            'Name'                    : get_text('name'),
-            'Version'                 : get_text('versionInfo'),
-            'Supplier'                : clean_supplier( 
-                                            get_text('supplier')),
-            'License_Declared'        : get_text('licenseDeclared'),
-            'Copyright_Text'          : get_text('copyrightText'),
-            'Download_Location'       : get_text('downloadLocation'),
-            'Homepage'                : get_text('homepage'),
-            'Description'             : get_text('description'),
-            'Package_Manager_Locator' : extract_package_manager_locator(ext_refs),
-            'is_root_metadata'        : (get_text('SPDXID') in document_describes)
-        })
+        components.append(normalize_component(
+            spdx_id=spdx_id, name=get_text('name'), version=get_text('versionInfo'),
+            supplier=get_text('supplier'), license_decl=get_text('licenseDeclared'),
+            copyright_text=get_text('copyrightText'), download_loc=get_text('downloadLocation'),
+            homepage=get_text('homepage'), description=get_text('description'),
+            purl=extract_package_manager_locator(ext_refs), is_root=(spdx_id in describes)
+        ))
 
-    forward_rels = ('DEPENDS_ON', 'CONTAINS', 'DYNAMIC_LINK', 'STATIC_LINK', 'HAS_PREREQUISITE', 'DESCRIBES', 'PACKAGE_OF')
-    reverse_rels = ('DEPENDENCY_OF', 'CONTAINED_BY', 'PREREQUISITE_FOR', 'DESCRIBED_BY')
-    relationships = []
-    for rel in root.iter(f'{ns}relationship'):
-        r_type = rel.find(f'{ns}relationshipType')
-        parent = rel.find(f'{ns}spdxElementId')
-        child = rel.find(f'{ns}relatedSpdxElement')
-        if r_type is not None and parent is not None and child is not None:
-            rtype_text = r_type.text.strip()
-            if rtype_text in forward_rels:
-                relationships.append({
-                    'parent': parent.text.strip(),
-                    'child': child.text.strip(),
-                    'type': rtype_text
-                })
-            elif rtype_text in reverse_rels:
-                relationships.append({
-                    'parent': child.text.strip(),
-                    'child': parent.text.strip(),
-                    'type': rtype_text
-                })
-
-    return components, relationships
+    rels = map_relationships(
+        root.iter(f'{ns}relationship'),
+        lambda r: (r.find(f'{ns}relationshipType').text or '').strip() if r.find(f'{ns}relationshipType') is not None else '',
+        lambda r: (r.find(f'{ns}spdxElementId').text or '').strip() if r.find(f'{ns}spdxElementId') is not None else '',
+        lambda r: (r.find(f'{ns}relatedSpdxElement').text or '').strip() if r.find(f'{ns}relatedSpdxElement') is not None else ''
+    )
+    return components, rels
 
 
 def parse_cyclonedx_json(input_file):
-    with open(input_file, 'r', encoding='utf-8') as f:
-        sbom_data = json.load(f)
-
+    with open(input_file, 'r', encoding='utf-8') as f: sbom_data = json.load(f)
     raw_components = sbom_data.get('components', [])
     meta_comp = sbom_data.get('metadata', {}).get('component')
-    if meta_comp:
-        raw_components = [meta_comp] + raw_components
+    if meta_comp: raw_components = [meta_comp] + raw_components
 
-    import urllib.parse
-    
     components = []
     for i, comp in enumerate(raw_components):
-        license_decl = 'N/A'
-        licenses = comp.get('licenses', [])
-        if licenses:
-            lic = licenses[0].get('license', {})
-            license_decl = lic.get('id') or lic.get('name') or 'N/A'
+        license_decl = None
+        if comp.get('licenses'):
+            lic = comp['licenses'][0].get('license', {})
+            license_decl = lic.get('id') or lic.get('name')
 
-        purl = comp.get('purl', 'N/A')
-        supplier = 'N/A'
+        purl = comp.get('purl')
         sup_dict = comp.get('supplier')
-        if sup_dict and isinstance(sup_dict, dict):
-            supplier = sup_dict.get('name', 'N/A')
+        supplier = sup_dict.get('name') if isinstance(sup_dict, dict) else None
+        bom_ref = comp.get('bom-ref') or purl or f"gen-id-{i}-{comp.get('name', 'unknown')}"
 
-        bom_ref = comp.get('bom-ref')
-        if not bom_ref:
-            bom_ref = purl if purl != 'N/A' else f"gen-id-{i}-{comp.get('name', 'unknown')}"
-        bom_ref = urllib.parse.unquote(bom_ref)
-
-        components.append({
-            'SPDX_ID'                 : bom_ref,
-            'Name'                    : comp.get('name', 'N/A'),
-            'Version'                 : comp.get('version', 'N/A'),
-            'Supplier'                : clean_supplier(supplier),
-            'License_Declared'        : license_decl,
-            'Copyright_Text'          : 'N/A',
-            'Download_Location'       : 'N/A',
-            'Homepage'                : 'N/A',
-            'Description'             : comp.get('description', 'N/A'),
-            'Package_Manager_Locator' : purl,
-            'is_root_metadata'        : (i == 0 and meta_comp is not None)
-        })
+        components.append(normalize_component(
+            spdx_id=bom_ref, name=comp.get('name'), version=comp.get('version'),
+            supplier=supplier, license_decl=license_decl, copyright_text=None,
+            download_loc=None, homepage=None, description=comp.get('description'),
+            purl=purl, is_root=(i == 0 and meta_comp is not None)
+        ))
 
     relationships = []
     for dep in sbom_data.get('dependencies', []):
-        parent_ref = urllib.parse.unquote(dep.get('ref', ''))
+        parent_ref = dep.get('ref', '')
         if not parent_ref: continue
         for child_ref in dep.get('dependsOn', []):
-            child_ref = urllib.parse.unquote(child_ref)
-            relationships.append({
-                'parent': parent_ref,
-                'child': child_ref,
-                'type': 'DEPENDS_ON'
-            })
-
+            if isinstance(child_ref, dict): child_ref = child_ref.get('ref', '')
+            relationships.append({'parent': parent_ref, 'child': child_ref, 'type': 'DEPENDS_ON'})
     return components, relationships
 
+def build_dependency_tree(components, relationships):
+    if not relationships:
+        for c in components: c.update({'depth': 0, 'Tree_ID': '1', 'Relation_Type': 'Root'})
+        return components
+
+    comp_map = {c['SPDX_ID']: c for c in components}
+    children = {c['SPDX_ID']: [] for c in components}
+    parents = {c['SPDX_ID']: [] for c in components}
+
+    for rel in relationships:
+        p, c = rel['parent'], rel['child']
+        if p in comp_map and c in comp_map:
+            if c not in children[p]: children[p].append(c)
+            if p not in parents[c]: parents[c].append(p)
+
+    roots = []
+    seen = set()
+    for c_id in comp_map:
+        if c_id in seen: continue
+        if not parents[c_id] or any(r.get('type') in ('DESCRIBES', 'PACKAGE_OF') for r in relationships if r.get('parent') == c_id):
+            roots.append(c_id)
+            seen.add(c_id)
+
+    if not roots: roots = list(comp_map.keys())
+    roots = list(dict.fromkeys(roots))
+    
+    metadata_root_id = next((c['SPDX_ID'] for c in components if c.get('is_root_metadata')), None)
+    if metadata_root_id and metadata_root_id in roots and len(roots) > 1:
+        for r_id in roots:
+            if r_id != metadata_root_id:
+                children[metadata_root_id].append(r_id)
+                parents[r_id].append(metadata_root_id)
+        roots = [metadata_root_id]
+
+    result, visited = [], set()
+
+    def dfs(c_id, parent_id, depth, tree_id, path_set=None, parent_tree_id=''):
+        if path_set is None: path_set = set()
+        if c_id in path_set: return
+        path_set.add(c_id)
+        visited.add(c_id)
+        comp = comp_map[c_id].copy()
+        comp.update({
+            'depth': depth, 'tree_parent': parent_id, 'tree_parent_id': parent_tree_id,
+            'Tree_ID': tree_id, 'Relation_Type': 'Direct' if depth == 1 else 'Transitive' if depth > 1 else 'Root'
+        })
+        result.append(comp)
+        child_list = sorted(children.get(c_id, []), key=lambda x: (bool(children.get(x, [])), comp_map[x].get('Name', '').lower()))
+        for idx, child_id in enumerate(child_list, start=1):
+            dfs(child_id, c_id, depth + 1, f"{tree_id}.{idx}" if tree_id else str(idx), path_set.copy(), tree_id)
+
+    for idx, r_id in enumerate(roots, start=1): dfs(r_id, '', 0, str(idx), None, '')
+    for idx, c_id in enumerate([c for c in comp_map if c not in visited], start=len(roots) + 1): dfs(c_id, '', 0, str(idx), None, '')
+    return result
 
 def parse_sbom(input_file):
     ext = os.path.splitext(input_file)[1].lower()
     if ext == '.json':
         with open(input_file, 'r', encoding='utf-8') as f:
-            try:
-                data = json.load(f)
-            except Exception:
-                data = {}
-        if data.get('bomFormat') == 'CycloneDX':
-            return parse_cyclonedx_json(input_file)
-        return parse_spdx_json(input_file)
-    elif ext in ['.spdx', '.tv']:
-        return parse_spdx_tv(input_file)
-    elif ext == '.xml':
-        return parse_spdx_xml(input_file)
-    else:
-        raise ValueError(f"Unsupported format: {ext}")
+            try: data = json.load(f)
+            except Exception: data = {}
+        if data.get('bomFormat') == 'CycloneDX': comps, rels = parse_cyclonedx_json(input_file)
+        else: comps, rels = parse_spdx_json(input_file)
+    elif ext in ['.spdx', '.tv']: comps, rels = parse_spdx_tv(input_file)
+    elif ext == '.xml': comps, rels = parse_spdx_xml(input_file)
+    else: raise ValueError(f"Unsupported format: {ext}")
+    return build_dependency_tree(comps, rels)
 
 
 def save_to_csv(components, output_file):
@@ -404,6 +363,17 @@ COL_WIDTHS = {
     'Package_Manager_Locator' : 180,
 }
 
+
+def to_unicode_bold(text):
+    if not isinstance(text, str):
+        text = str(text)
+    bold_map = {}
+    for i in range(26):
+        bold_map[ord('A') + i] = 0x1D400 + i
+        bold_map[ord('a') + i] = 0x1D41A + i
+    for i in range(10):
+        bold_map[ord('0') + i] = 0x1D7CE + i
+    return text.translate(bold_map)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CUSTOM WIDGETS
@@ -756,6 +726,7 @@ class SBOMParserApp(tk.Tk):
         self._tree.tag_configure('odd',     background=COLORS['row_odd'])
         self._tree.tag_configure('even',    background=COLORS['row_even'])
         self._tree.tag_configure('no_purl', foreground=COLORS['warning'])
+        self._tree.tag_configure('highlight', background=COLORS['primary_hover'], foreground='white')
 
         vsb = ttk.Scrollbar(tree_frame, orient='vertical',
                             command=self._tree.yview)
@@ -904,93 +875,19 @@ class SBOMParserApp(tk.Tk):
 
     def _parse_worker(self, input_file):
         try:
-            components, relationships = parse_sbom(input_file)
-            self.after(0, self._on_parse_success, components, relationships)
+            tree_components = parse_sbom(input_file)
+            self.after(0, self._on_parse_success, tree_components)
         except Exception as exc:
             self.after(0, self._on_parse_error, str(exc))
 
-    def _build_tree_data(self, components, relationships):
-        if not relationships:
-            for c in components:
-                c['depth'] = 0
-                c['Tree_ID'] = '1'
-                c['Relation_Type'] = 'Root'
-            return components
-
-        comp_map = {c['SPDX_ID']: c for c in components}
-        children = {c['SPDX_ID']: [] for c in components}
-        parents = {c['SPDX_ID']: [] for c in components}
-
-        for rel in relationships:
-            p = rel['parent']
-            c = rel['child']
-            if p in comp_map and c in comp_map:
-                if c not in children[p]:
-                    children[p].append(c)
-                if p not in parents[c]:
-                    parents[c].append(p)
-        roots = []
-        seen = set()
-        for c_id in comp_map:
-            if c_id in seen:
-                continue
-            if not parents[c_id] or any(r.get('type') in ('DESCRIBES', 'PACKAGE_OF') 
-                                       for r in relationships if r.get('parent') == c_id):
-                roots.append(c_id)
-                seen.add(c_id)
-
-        if not roots:
-            roots = list(comp_map.keys())
-        roots = list(dict.fromkeys(roots))
-        metadata_root_id = next((c['SPDX_ID'] for c in components if c.get('is_root_metadata')), None)
-        if metadata_root_id and metadata_root_id in roots and len(roots) > 1:
-            for r_id in roots:
-                if r_id != metadata_root_id:
-                    children[metadata_root_id].append(r_id)
-                    parents[r_id].append(metadata_root_id)
-            roots = [metadata_root_id]
-
-        result = []
-        visited = set()
-
-        def dfs(c_id, parent_id, depth, tree_id, path_set=None, parent_tree_id=''):
-            if path_set is None:
-                path_set = set()
-
-            if c_id in path_set:
-                return
-            path_set.add(c_id)
-            visited.add(c_id)
-            comp = comp_map[c_id].copy()
-            comp['depth'] = depth
-            comp['tree_parent'] = parent_id
-            comp['tree_parent_id'] = parent_tree_id
-            comp['Tree_ID'] = tree_id
-            comp['Relation_Type'] = 'Direct' if depth == 1 else 'Transitive' if depth > 1 else 'Root'
-            result.append(comp)
-            child_list = sorted(
-                children.get(c_id, []),
-                key=lambda x: (bool(children.get(x, [])), comp_map[x].get('Name', '').lower())
-            )
-            for idx, child_id in enumerate(child_list, start=1):
-                new_id = f"{tree_id}.{idx}" if tree_id else str(idx)
-                dfs(child_id, c_id, depth + 1, new_id, path_set.copy(), tree_id)
-        for idx, r_id in enumerate(roots, start=1):
-            dfs(r_id, '', 0, str(idx), None, '')
-        unvisited = [c_id for c_id in comp_map if c_id not in visited]
-        for idx, c_id in enumerate(unvisited, start=len(roots) + 1):
-            dfs(c_id, '', 0, str(idx), None, '')
-        return result
-
-    def _on_parse_success(self, components, relationships):
+    def _on_parse_success(self, tree_components):
         self._progress.stop()
         self._parse_btn.set_enabled(True)
-        tree_components = self._build_tree_data(components, relationships)
         self._components = tree_components
         self._populate_table(tree_components)
         self._update_stats(tree_components)
         self._set_status(
-            f'✔  Parsed {len(components)} components successfully.',
+            f'✔  Parsed {len(tree_components)} components successfully.',
             COLORS['success'])
 
     def _on_parse_error(self, error):
@@ -1000,16 +897,28 @@ class SBOMParserApp(tk.Tk):
         messagebox.showerror('Parse Error',
                              f'Failed to parse SBOM:\n\n{error}')
 
-    def _populate_table(self, components):
+    def _populate_table(self, components, highlight_map=None):
         self._clear_table()
         iid_map = {}
         for i, comp in enumerate(components):
-            base_tag = 'odd' if i % 2 else 'even'
-            tags     = (base_tag, 'no_purl') \
-                       if comp.get('Package_Manager_Locator', 'N/A') == 'N/A' \
-                       else (base_tag,)
+            tags = []
+            matched_cols = highlight_map.get(comp.get('Tree_ID'), []) if highlight_map else []
             
-            values = [comp.get(col, '') for col in COLUMNS]
+            tags.append('odd' if i % 2 else 'even')
+                
+            if comp.get('Package_Manager_Locator', 'N/A') == 'N/A':
+                tags.append('no_purl')
+            
+            values = []
+            for col in COLUMNS:
+                val = str(comp.get(col, ''))
+                if col in matched_cols:
+                    val = to_unicode_bold(val)
+                values.append(val)
+            
+            name_val = str(comp.get('Name', ''))
+            if 'Name' in matched_cols:
+                name_val = to_unicode_bold(name_val)
             
             parent_tree_id = comp.get('tree_parent_id', '')
             parent_iid = iid_map.get(parent_tree_id, '')
@@ -1018,9 +927,9 @@ class SBOMParserApp(tk.Tk):
             iid_map[comp['Tree_ID']] = my_iid
             
             self._tree.insert(parent_iid, 'end', iid=my_iid,
-                              text=comp.get('Name', ''),
+                              text=name_val,
                               values=tuple(values),
-                              tags=tags,
+                              tags=tuple(tags),
                               open=True)
 
     def _clear_table(self):
@@ -1056,20 +965,31 @@ class SBOMParserApp(tk.Tk):
             return
         terms = [t.strip() for t in query.split('+') if t.strip()]
         needed_tree_ids = set()
+        exact_match_map = {}
         match_count = 0
         for comp in self._components:
+            matched_cols = []
             if col == 'All':
-                match = all(
-                    any(term in str(v).lower()
-                        for k, v in comp.items() if k in COLUMNS)
-                    for term in terms
-                )
+                terms_found = {term: False for term in terms}
+                col_matches = set()
+                for k in COLUMNS:
+                    val = str(comp.get(k, '')).lower()
+                    for term in terms:
+                        if term in val:
+                            terms_found[term] = True
+                            col_matches.add(k)
+                match = all(terms_found.values())
+                if match:
+                    matched_cols = list(col_matches)
             else:
                 col_val = str(comp.get(col, '')).lower()
                 match = all(term in col_val for term in terms)
+                if match:
+                    matched_cols = [col]
             if match:
                 match_count += 1
                 tree_id = comp.get('Tree_ID', '')
+                exact_match_map[tree_id] = matched_cols
                 needed_tree_ids.add(tree_id)
                 parts = tree_id.split('.')
                 for i in range(1, len(parts)):
@@ -1078,7 +998,7 @@ class SBOMParserApp(tk.Tk):
         filtered = [c for c in self._components
                     if c.get('Tree_ID', '') in needed_tree_ids]
 
-        self._populate_table(filtered)
+        self._populate_table(filtered, highlight_map=exact_match_map)
         self._set_status(
             f'Filter: {match_count} matches ({len(filtered)} shown with ancestors) '
             f'of {len(self._components)} total.',
@@ -1095,10 +1015,9 @@ class SBOMParserApp(tk.Tk):
         data.sort(key=lambda x: x[0].lower(), reverse=reverse)
         for idx, (_, child) in enumerate(data):
             self._tree.move(child, '', idx)
-            tag      = 'odd' if idx % 2 else 'even'
             cur_tags = list(self._tree.item(child, 'tags'))
-            new_tags = [t for t in cur_tags
-                        if t not in ('odd', 'even')] + [tag]
+            new_tags = [t for t in cur_tags if t not in ('odd', 'even')]
+            new_tags.append('odd' if idx % 2 else 'even')
             self._tree.item(child, tags=new_tags)
         self._sort_reverse[col] = not reverse
 
