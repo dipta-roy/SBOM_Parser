@@ -1051,11 +1051,12 @@ def generate_spdx(packages: list[dict], output_file: str, project_name: str = "P
         }
         spdx_doc["packages"].append(spdx_pkg)
 
-        spdx_doc["relationships"].append({
-            "spdxElementId": "SPDXRef-Root",
-            "relationshipType": "DEPENDS_ON",
-            "relatedSpdxElement": spdx_id
-        })
+        if pkg.get('scope', 'direct') == 'direct':
+            spdx_doc["relationships"].append({
+                "spdxElementId": "SPDXRef-Root",
+                "relationshipType": "DEPENDS_ON",
+                "relatedSpdxElement": spdx_id
+            })
 
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(spdx_doc, f, indent=2)
